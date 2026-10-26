@@ -1,0 +1,169 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*" # push events to matching v*, i.e. v1.0, v20.15.10
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create release for tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          source ./scripts/upload-asset.sh
+          # Create:      <token>                     <repo>                   <tag>
+          create_release ${{ secrets.GITHUB_TOKEN }} ${{ github.repository }} ${GITHUB_REF#refs/*/} "Tealdeer version ${GITHUB_REF#refs/*/v}.\n\nFor the full changelog, see https://github.com/tealdeer-rs/tealdeer/blob/main/CHANGELOG.md.\n\nBinaries were generated automatically in CI, and are therefore unsigned. For a fully trusted release, please build from source."
+
+  upload-completions:
+    needs:
+      - create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: ["bash", "fish", "zsh"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Upload completion
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          source ./scripts/upload-asset.sh
+          # Upload:           <token>                     <repo>                   <tag>                 <file>                        <name>
+          upload_release_file ${{ secrets.GITHUB_TOKEN }} ${{ github.repository }} ${GITHUB_REF#refs/*/} completion/${{ matrix.target }}_tealdeer completions_${{ matrix.target }}
+
+  upload-license:
+    needs:
+      - create-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: ["MIT", "APACHE"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Upload license
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          source ./scripts/upload-asset.sh
+          # Upload:           <token>                     <repo>                   <tag>                 <file>                       <name>
+          upload_release_file ${{ secrets.GITHUB_TOKEN }} ${{ github.repository }} ${GITHUB_REF#refs/*/} LICENSE-${{ matrix.target }} LICENSE-${{ matrix.target }}.txt
+
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: "x86_64"
+            libc: "musl"
+          - arch: "aarch64"
+            libc: "musl"
+          - arch: "i686"
+            libc: "musl"
+          - arch: "armv7"
+            libc: "musleabihf"
+          - arch: "arm"
+            libc: "musleabi"
+          - arch: "arm"
+            libc: "musleabihf"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Pull Docker image
+        run: docker pull messense/rust-musl-cross:${{ matrix.arch }}-${{ matrix.libc }}
+      - name: Build in Docker
+        run: docker run --rm -i -v "$(pwd)":/home/rust/src messense/rust-musl-cross:${{ matrix.arch }}-${{ matrix.libc }} cargo build --locked --release
+      - name: Strip binary
+        run: docker run --rm -i -v "$(pwd)":/home/rust/src messense/rust-musl-cross:${{ matrix.arch }}-${{ matrix.libc }} musl-strip -s /home/rust/src/target/${{ matrix.arch }}-unknown-linux-${{ matrix.libc }}/release/tldr
+      - uses: actions/upload-artifact@v7
+        with:
+          name: "tealdeer-linux-${{ matrix.arch }}-${{ matrix.libc }}"
+          path: "target/${{ matrix.arch }}-unknown-linux-${{ matrix.libc }}/release/tldr"
+
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - arch: "x86_64"
+          - arch: "aarch64"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: "${{ matrix.arch }}-apple-darwin"
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.arch }}-apple-darwin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: "tealdeer-macos-${{ matrix.arch }}"
+          path: "target/${{ matrix.arch }}-apple-darwin/release/tldr"
+
+  build-windows:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - arch: "x86_64"
+            os: windows-latest
+          - arch: "aarch64"
+            os: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+            toolchain: stable
+            targets: "${{ matrix.arch }}-pc-windows-msvc"
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.arch }}-pc-windows-msvc
+      - uses: actions/upload-artifact@v7
+        with:
+          name: "tealdeer-windows-${{ matrix.arch }}-msvc"
+          path: "target/${{ matrix.arch }}-pc-windows-msvc/release/tldr.exe"
+
+  upload-release:
+    needs:
+      - create-release
+      - build-linux
+      - build-macos
+      - build-windows
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - linux-x86_64-musl
+          - linux-aarch64-musl
+          - linux-i686-musl
+          - linux-armv7-musleabihf
+          - linux-arm-musleabi
+          - linux-arm-musleabihf
+          - macos-x86_64
+          - macos-aarch64
+          - windows-x86_64-msvc
+          - windows-aarch64-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+      - name: Upload binary
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          source ./scripts/upload-asset.sh
+
+          # Move/rename file
+          mkdir out && cd out
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            src="../tealdeer-${{ matrix.target }}/tldr.exe"
+            filename="tealdeer-${{ matrix.target }}.exe"
+          else
+            src="../tealdeer-${{ matrix.target }}/tldr"
+            filename="tealdeer-${{ matrix.target }}"
+          fi
+          cp $src $filename
+
+          # Create checksum
+          sha256sum "$filename" > "$filename.sha256"
+
+          # Upload:           <token>                     <repo>                   <tag>                 <file>           <name>
+          upload_release_file ${{ secrets.GITHUB_TOKEN }} ${{ github.repository }} ${GITHUB_REF#refs/*/} $filename        $filename
+          upload_release_file ${{ secrets.GITHUB_TOKEN }} ${{ github.repository }} ${GITHUB_REF#refs/*/} $filename.sha256 $filename.sha256

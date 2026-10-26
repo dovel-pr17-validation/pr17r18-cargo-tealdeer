@@ -1,0 +1,5 @@
+[book]
+authors = ["Danilo Bargen", "Niklas Mohrin"]
+language = "en"
+src = "src"
+title = "Tealdeer User Manual"
